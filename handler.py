@@ -51,19 +51,19 @@ def _ensure_weights():
         return False
 
     try:
-        # Clean up partial downloads FIRST (previous failed attempts filled the volume)
+        # If weights dir exists but FP8 checkpoint is missing, it's junk from failed downloads
         import shutil
         if os.path.exists(WEIGHTS_DIR):
-            st = os.statvfs(VOLUME_DIR)
-            free_gb = (st.f_bavail * st.f_frsize) / 1024**3
-            total_gb = (st.f_blocks * st.f_frsize) / 1024**3
-            print(f"[handler] Volume: {free_gb:.1f}GB free / {total_gb:.1f}GB total", flush=True)
-            if free_gb < 25:
-                print(f"[handler] Cleaning partial downloads ({total_gb - free_gb:.1f}GB junk)...", flush=True)
-                shutil.rmtree(WEIGHTS_DIR, ignore_errors=True)
-                st2 = os.statvfs(VOLUME_DIR)
-                free_gb = (st2.f_bavail * st2.f_frsize) / 1024**3
-                print(f"[handler] After cleanup: {free_gb:.1f}GB free", flush=True)
+            # Check actual size with du
+            du = subprocess.run(["du", "-sm", WEIGHTS_DIR], capture_output=True, text=True, timeout=30)
+            used_mb = int(du.stdout.split()[0]) if du.returncode == 0 else 0
+            print(f"[handler] Existing weights dir: {used_mb}MB — cleaning (no valid checkpoint)...", flush=True)
+            shutil.rmtree(WEIGHTS_DIR, ignore_errors=True)
+            # Also clean any HF cache on volume
+            hf_cache = os.path.join(VOLUME_DIR, ".cache")
+            if os.path.exists(hf_cache):
+                shutil.rmtree(hf_cache, ignore_errors=True)
+                print(f"[handler] Cleaned HF cache too", flush=True)
 
         os.makedirs(WEIGHTS_DIR, exist_ok=True)
         # Verify writable
