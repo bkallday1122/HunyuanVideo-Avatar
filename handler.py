@@ -94,11 +94,13 @@ def _ensure_weights():
             url = f"{BASE}/{fpath}"
             print(f"  [{i+1}/{len(FILES)}] {fpath}...", flush=True)
             result = subprocess.run(
-                ["wget", "-q", "--show-progress", "-O", dest, url],
-                timeout=1800,
+                ["curl", "-sL", "--retry", "3", "--retry-delay", "5",
+                 "-o", dest, url],
+                capture_output=True, timeout=1800,
             )
-            if result.returncode != 0:
-                print(f"  FAILED to download {fpath}", flush=True)
+            if result.returncode != 0 or not os.path.exists(dest) or os.path.getsize(dest) < 10:
+                stderr = (result.stderr or b"").decode()[-200:]
+                print(f"  FAILED {fpath}: exit={result.returncode} {stderr}", flush=True)
                 if os.path.exists(dest):
                     os.remove(dest)
 
