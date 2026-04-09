@@ -51,12 +51,16 @@ def _ensure_weights():
         return False
 
     try:
+        # Disable xet storage (causes "Background writer channel closed" errors)
+        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
         from huggingface_hub import snapshot_download
         os.makedirs(WEIGHTS_DIR, exist_ok=True)
         print("[handler] Downloading tencent/HunyuanVideo-Avatar (~50GB)...", flush=True)
+        # Skip full-precision checkpoint (30GB) — only need FP8 for single GPU
         snapshot_download(
             "tencent/HunyuanVideo-Avatar",
             local_dir=WEIGHTS_DIR,
+            ignore_patterns=["*mp_rank_00_model_states.pt"],
         )
         if os.path.exists(FP8_CKPT):
             ckpt_gb = os.path.getsize(FP8_CKPT) / 1024 / 1024 / 1024
@@ -93,7 +97,7 @@ os.environ["MODEL_BASE"] = WEIGHTS_DIR
 
 # Check VRAM
 if torch.cuda.is_available():
-    vram_gb = torch.cuda.get_device_properties(0).total_mem / 1024**3
+    vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
     print(f"[handler] GPU: {torch.cuda.get_device_name(0)}, VRAM: {vram_gb:.1f}GB", flush=True)
     if vram_gb < 40:
         os.environ["CPU_OFFLOAD"] = "1"
