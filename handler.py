@@ -63,11 +63,21 @@ def _ensure_weights():
             print(f"[handler] ERROR: Volume NOT writable: {we}", flush=True)
             # Try /tmp as fallback
             return False
-        # Show disk space
-        st = os.statvfs(WEIGHTS_DIR)
+        # Show disk space on volume
+        st = os.statvfs(VOLUME_DIR)
         free_gb = (st.f_bavail * st.f_frsize) / 1024**3
         total_gb = (st.f_blocks * st.f_frsize) / 1024**3
-        print(f"[handler] Disk: {free_gb:.1f}GB free / {total_gb:.1f}GB total", flush=True)
+        print(f"[handler] Volume disk: {free_gb:.1f}GB free / {total_gb:.1f}GB total", flush=True)
+        # Clean up any partial downloads from previous failed attempts
+        if free_gb < 25:
+            print(f"[handler] Volume low on space — cleaning up partial downloads...", flush=True)
+            import shutil
+            if os.path.exists(WEIGHTS_DIR):
+                shutil.rmtree(WEIGHTS_DIR)
+                os.makedirs(WEIGHTS_DIR, exist_ok=True)
+            st2 = os.statvfs(VOLUME_DIR)
+            free_gb2 = (st2.f_bavail * st2.f_frsize) / 1024**3
+            print(f"[handler] After cleanup: {free_gb2:.1f}GB free", flush=True)
         print("[handler] Downloading weights via curl...", flush=True)
 
         BASE = "https://huggingface.co/tencent/HunyuanVideo-Avatar/resolve/main"
