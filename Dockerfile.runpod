@@ -25,18 +25,13 @@ RUN pip install --no-cache-dir flash-attn==2.6.3 --no-build-isolation
 # Install HunyuanVideo-Avatar requirements
 RUN cd /app/hunyuan && pip install --no-cache-dir -r requirements.txt
 
-# Install runpod + fix numpy
-RUN pip install --no-cache-dir runpod numpy==1.24.4
+# Install runpod + fix numpy + huggingface_hub for weight download
+RUN pip install --no-cache-dir runpod numpy==1.24.4 huggingface_hub
 
-# Download model weights (FP8 for single GPU — ~50GB)
-RUN pip install --no-cache-dir huggingface_hub && \
-    cd /app/hunyuan/weights && \
-    python3 -c "from huggingface_hub import snapshot_download; snapshot_download('tencent/HunyuanVideo-Avatar', local_dir='./')"
-
+# Weights downloaded at startup to /runpod-volume/ (network volume)
 COPY handler.py /app/handler.py
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app/hunyuan
-ENV MODEL_BASE=/app/hunyuan/weights
 ENV DISABLE_SP=1
 CMD ["python3", "-u", "handler.py"]

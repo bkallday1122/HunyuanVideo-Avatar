@@ -3,6 +3,7 @@ RunPod Serverless Handler — HunyuanVideo-Avatar
 
 Takes a reference image + audio, produces a talking avatar video.
 Supports animated/cartoon characters. 704x768 output, 25fps, ~5s clips.
+Weights stored on RunPod Network Volume (/runpod-volume/).
 """
 
 import base64
@@ -23,8 +24,10 @@ if not hasattr(torch, "xpu"):
 import runpod
 
 HUNYUAN_DIR = "/app/hunyuan"
+VOLUME_DIR = "/runpod-volume"
+WEIGHTS_DIR = os.path.join(VOLUME_DIR, "hunyuan-weights")
 FP8_CKPT = os.path.join(
-    HUNYUAN_DIR, "weights", "ckpts", "hunyuan-video-t2v-720p",
+    WEIGHTS_DIR, "ckpts", "hunyuan-video-t2v-720p",
     "transformers", "mp_rank_00_model_states_fp8.pt"
 )
 
@@ -34,26 +37,64 @@ _load_start = time.time()
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"[handler] Device: {device}, CUDA: {torch.version.cuda}", flush=True)
 
-# Check weights
-if os.path.exists(FP8_CKPT):
-    ckpt_gb = os.path.getsize(FP8_CKPT) / 1024 / 1024 / 1024
-    print(f"[handler] FP8 checkpoint: {ckpt_gb:.1f}GB", flush=True)
-else:
-    print(f"[handler] WARNING: FP8 checkpoint not found at {FP8_CKPT}", flush=True)
-    weights_dir = os.path.join(HUNYUAN_DIR, "weights")
-    if os.path.exists(weights_dir):
-        for root, dirs, files in os.walk(weights_dir):
-            for f in files:
-                fp = os.path.join(root, f)
-                sz = os.path.getsize(fp) / 1024 / 1024
-                if sz > 10:
-                    print(f"  {fp} ({sz:.0f}MB)", flush=True)
+# Download weights to network volume on first startup
+def _ensure_weights():
+    """Download model weights to network volume if not present."""
+    if os.path.exists(FP8_CKPT):
+        ckpt_gb = os.path.getsize(FP8_CKPT) / 1024 / 1024 / 1024
+        print(f"[handler] FP8 checkpoint found: {ckpt_gb:.1f}GB", flush=True)
+        return True
+
+    print(f"[handler] Weights not found — downloading to {WEIGHTS_DIR}...", flush=True)
+    if not os.path.exists(VOLUME_DIR):
+        print(f"[handler] ERROR: Network volume not mounted at {VOLUME_DIR}", flush=True)
+        return False
+
+    try:
+        from huggingface_hub import snapshot_download
+        os.makedirs(WEIGHTS_DIR, exist_ok=True)
+        print("[handler] Downloading tencent/HunyuanVideo-Avatar (~50GB)...", flush=True)
+        snapshot_download(
+            "tencent/HunyuanVideo-Avatar",
+            local_dir=WEIGHTS_DIR,
+        )
+        if os.path.exists(FP8_CKPT):
+            ckpt_gb = os.path.getsize(FP8_CKPT) / 1024 / 1024 / 1024
+            print(f"[handler] Download complete: {ckpt_gb:.1f}GB", flush=True)
+            return True
+        else:
+            print(f"[handler] Download finished but FP8 checkpoint not found!", flush=True)
+            # List what was downloaded
+            for root, dirs, files in os.walk(WEIGHTS_DIR):
+                for f in files:
+                    fp = os.path.join(root, f)
+                    sz = os.path.getsize(fp) / 1024 / 1024
+                    if sz > 10:
+                        print(f"  {fp} ({sz:.0f}MB)", flush=True)
+            return False
+    except Exception as e:
+        print(f"[handler] Weight download failed: {e}", flush=True)
+        return False
+
+_weights_ok = _ensure_weights()
+
+# Symlink weights dir so the model code finds them
+weights_link = os.path.join(HUNYUAN_DIR, "weights")
+if _weights_ok and not os.path.exists(weights_link):
+    os.symlink(WEIGHTS_DIR, weights_link)
+elif _weights_ok and os.path.isdir(weights_link) and not os.path.islink(weights_link):
+    # Remove empty weights dir and symlink
+    import shutil
+    shutil.rmtree(weights_link)
+    os.symlink(WEIGHTS_DIR, weights_link)
+
+# Set MODEL_BASE for the inference script
+os.environ["MODEL_BASE"] = WEIGHTS_DIR
 
 # Check VRAM
 if torch.cuda.is_available():
     vram_gb = torch.cuda.get_device_properties(0).total_mem / 1024**3
     print(f"[handler] GPU: {torch.cuda.get_device_name(0)}, VRAM: {vram_gb:.1f}GB", flush=True)
-    # Enable CPU offload for GPUs under 40GB
     if vram_gb < 40:
         os.environ["CPU_OFFLOAD"] = "1"
         print(f"[handler] CPU offload enabled (VRAM < 40GB)", flush=True)
@@ -63,6 +104,9 @@ print(f"[handler] Ready in {_load_elapsed:.1f}s", flush=True)
 
 
 def handler(job):
+    if not _weights_ok:
+        return {"error": "Model weights not available. Check network volume."}
+
     job_input = job["input"]
     start = time.time()
 
@@ -144,7 +188,6 @@ def handler(job):
                 "--infer-min",
             ]
 
-            # Add CPU offload for smaller GPUs
             if os.environ.get("CPU_OFFLOAD") == "1":
                 cmd.append("--cpu-offload")
 
@@ -153,7 +196,7 @@ def handler(job):
                 cmd, capture_output=True, text=True,
                 cwd=HUNYUAN_DIR, timeout=3600,
                 env={**os.environ, "PYTHONPATH": HUNYUAN_DIR,
-                     "MODEL_BASE": os.path.join(HUNYUAN_DIR, "weights"),
+                     "MODEL_BASE": WEIGHTS_DIR,
                      "DISABLE_SP": "1"},
             )
             if proc.returncode != 0:
