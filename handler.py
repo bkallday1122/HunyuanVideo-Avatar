@@ -75,35 +75,39 @@ def _ensure_weights():
         print("[handler] Downloading weights via curl...", flush=True)
 
         BASE = "https://huggingface.co/tencent/HunyuanVideo-Avatar/resolve/main"
-        # Essential files for FP8 single-GPU inference
+        # Download small config files FIRST, then large model files
         FILES = [
-            "ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states_fp8.pt",
-            "ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states_fp8_map.pt",
-            "ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt",
+            # Config files first (tiny, fast)
             "ckpts/hunyuan-video-t2v-720p/vae/config.json",
-            "ckpts/whisper-tiny/model.safetensors",
+            "ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states_fp8_map.pt",
             "ckpts/whisper-tiny/config.json",
             "ckpts/whisper-tiny/tokenizer.json",
             "ckpts/whisper-tiny/vocab.json",
             "ckpts/whisper-tiny/preprocessor_config.json",
-            "ckpts/det_align/detface.pt",
-            "ckpts/llava_llama_image/model-00001-of-00004.safetensors",
-            "ckpts/llava_llama_image/model-00002-of-00004.safetensors",
-            "ckpts/llava_llama_image/model-00003-of-00004.safetensors",
-            "ckpts/llava_llama_image/model-00004-of-00004.safetensors",
             "ckpts/llava_llama_image/config.json",
             "ckpts/llava_llama_image/model.safetensors.index.json",
             "ckpts/llava_llama_image/tokenizer.json",
             "ckpts/llava_llama_image/tokenizer_config.json",
             "ckpts/llava_llama_image/special_tokens_map.json",
             "ckpts/llava_llama_image/preprocessor_config.json",
-            "ckpts/text_encoder_2/model.safetensors",
             "ckpts/text_encoder_2/config.json",
             "ckpts/text_encoder_2/tokenizer/merges.txt",
             "ckpts/text_encoder_2/tokenizer/special_tokens_map.json",
             "ckpts/text_encoder_2/tokenizer/tokenizer_config.json",
             "ckpts/text_encoder_2/tokenizer/vocab.json",
+            # Medium files
+            "ckpts/whisper-tiny/model.safetensors",
+            "ckpts/det_align/detface.pt",
             "ckpts/stable_syncnet.pt",
+            # Large files last
+            "ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt",
+            "ckpts/text_encoder_2/model.safetensors",
+            "ckpts/llava_llama_image/model-00001-of-00004.safetensors",
+            "ckpts/llava_llama_image/model-00002-of-00004.safetensors",
+            "ckpts/llava_llama_image/model-00003-of-00004.safetensors",
+            "ckpts/llava_llama_image/model-00004-of-00004.safetensors",
+            # Biggest file last (~25GB)
+            "ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states_fp8.pt",
         ]
 
         for i, fpath in enumerate(FILES):
@@ -118,7 +122,16 @@ def _ensure_weights():
                  "--progress-bar", "-o", dest, url],
                 capture_output=True, timeout=1800,
             )
-            if result.returncode != 0 or not os.path.exists(dest) or os.path.getsize(dest) < 10:
+            dest_size = os.path.getsize(dest) if os.path.exists(dest) else 0
+            # Check for HTML error pages (HuggingFace returns HTML on errors)
+            if dest_size > 0 and dest_size < 5000 and fpath.endswith(('.pt', '.safetensors')):
+                with open(dest, 'rb') as check:
+                    head = check.read(20)
+                if b'<!DOCTYPE' in head or b'<html' in head:
+                    print(f"  Got HTML instead of model file for {fpath} — removing", flush=True)
+                    os.remove(dest)
+                    dest_size = 0
+            if result.returncode != 0 or dest_size < 10:
                 stderr = (result.stderr or b"").decode()[-300:]
                 stdout = (result.stdout or b"").decode()[-200:]
                 print(f"  FAILED {fpath}: exit={result.returncode}", flush=True)
