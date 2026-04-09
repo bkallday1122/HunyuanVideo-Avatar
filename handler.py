@@ -51,33 +51,63 @@ def _ensure_weights():
         return False
 
     try:
-        # Disable xet storage (causes "Background writer channel closed" errors)
-        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
-        os.environ["HF_HUB_DISABLE_XET"] = "1"
-        # Uninstall hf_xet if present to force regular HTTP downloads
-        subprocess.run(["pip", "uninstall", "-y", "hf_xet"], capture_output=True, timeout=30)
-        from huggingface_hub import snapshot_download
         os.makedirs(WEIGHTS_DIR, exist_ok=True)
-        print("[handler] Downloading tencent/HunyuanVideo-Avatar (FP8 ~20GB)...", flush=True)
-        # Skip full-precision checkpoint (30GB) — only need FP8 for single GPU
-        snapshot_download(
-            "tencent/HunyuanVideo-Avatar",
-            local_dir=WEIGHTS_DIR,
-            ignore_patterns=["*mp_rank_00_model_states.pt"],
-        )
-        if os.path.exists(FP8_CKPT):
+        print("[handler] Downloading weights via wget (bypassing huggingface_hub)...", flush=True)
+
+        BASE = "https://huggingface.co/tencent/HunyuanVideo-Avatar/resolve/main"
+        # Essential files for FP8 single-GPU inference
+        FILES = [
+            "ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states_fp8.pt",
+            "ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states_fp8_map.pt",
+            "ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt",
+            "ckpts/hunyuan-video-t2v-720p/vae/config.json",
+            "ckpts/whisper-tiny/model.safetensors",
+            "ckpts/whisper-tiny/config.json",
+            "ckpts/whisper-tiny/tokenizer.json",
+            "ckpts/whisper-tiny/vocab.json",
+            "ckpts/whisper-tiny/preprocessor_config.json",
+            "ckpts/det_align/detface.pt",
+            "ckpts/llava_llama_image/model-00001-of-00004.safetensors",
+            "ckpts/llava_llama_image/model-00002-of-00004.safetensors",
+            "ckpts/llava_llama_image/model-00003-of-00004.safetensors",
+            "ckpts/llava_llama_image/model-00004-of-00004.safetensors",
+            "ckpts/llava_llama_image/config.json",
+            "ckpts/llava_llama_image/model.safetensors.index.json",
+            "ckpts/llava_llama_image/tokenizer.json",
+            "ckpts/llava_llama_image/tokenizer_config.json",
+            "ckpts/llava_llama_image/special_tokens_map.json",
+            "ckpts/llava_llama_image/preprocessor_config.json",
+            "ckpts/text_encoder_2/model.safetensors",
+            "ckpts/text_encoder_2/config.json",
+            "ckpts/text_encoder_2/tokenizer/merges.txt",
+            "ckpts/text_encoder_2/tokenizer/special_tokens_map.json",
+            "ckpts/text_encoder_2/tokenizer/tokenizer_config.json",
+            "ckpts/text_encoder_2/tokenizer/vocab.json",
+            "ckpts/stable_syncnet.pt",
+        ]
+
+        for i, fpath in enumerate(FILES):
+            dest = os.path.join(WEIGHTS_DIR, fpath)
+            if os.path.exists(dest) and os.path.getsize(dest) > 100:
+                continue  # Already downloaded
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            url = f"{BASE}/{fpath}"
+            print(f"  [{i+1}/{len(FILES)}] {fpath}...", flush=True)
+            result = subprocess.run(
+                ["wget", "-q", "--show-progress", "-O", dest, url],
+                timeout=1800,
+            )
+            if result.returncode != 0:
+                print(f"  FAILED to download {fpath}", flush=True)
+                if os.path.exists(dest):
+                    os.remove(dest)
+
+        if os.path.exists(FP8_CKPT) and os.path.getsize(FP8_CKPT) > 1000000:
             ckpt_gb = os.path.getsize(FP8_CKPT) / 1024 / 1024 / 1024
-            print(f"[handler] Download complete: {ckpt_gb:.1f}GB", flush=True)
+            print(f"[handler] Download complete: FP8 checkpoint {ckpt_gb:.1f}GB", flush=True)
             return True
         else:
-            print(f"[handler] Download finished but FP8 checkpoint not found!", flush=True)
-            # List what was downloaded
-            for root, dirs, files in os.walk(WEIGHTS_DIR):
-                for f in files:
-                    fp = os.path.join(root, f)
-                    sz = os.path.getsize(fp) / 1024 / 1024
-                    if sz > 10:
-                        print(f"  {fp} ({sz:.0f}MB)", flush=True)
+            print(f"[handler] FP8 checkpoint missing or too small after download!", flush=True)
             return False
     except Exception as e:
         print(f"[handler] Weight download failed: {e}", flush=True)
