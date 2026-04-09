@@ -49,7 +49,14 @@ def _ensure_weights():
         os.path.join(WEIGHTS_DIR, "ckpts/text_encoder_2/config.json"),
         os.path.join(WEIGHTS_DIR, "ckpts/det_align/detface.pt"),
     ]
-    missing = [f for f in CRITICAL_FILES if not os.path.exists(f) or os.path.getsize(f) < 10]
+    def _valid(f):
+        if not os.path.exists(f) or os.path.getsize(f) < 10:
+            return False
+        # FP8 checkpoint must be at least 20GB (corrupted partial downloads are smaller)
+        if f == FP8_CKPT and os.path.getsize(f) < 20 * 1024**3:
+            return False
+        return True
+    missing = [f for f in CRITICAL_FILES if not _valid(f)]
     if not missing:
         ckpt_gb = os.path.getsize(FP8_CKPT) / 1024 / 1024 / 1024
         print(f"[handler] All weights found (FP8: {ckpt_gb:.1f}GB)", flush=True)
