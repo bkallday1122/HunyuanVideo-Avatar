@@ -40,10 +40,21 @@ print(f"[handler] Device: {device}, CUDA: {torch.version.cuda}", flush=True)
 # Download weights to network volume on first startup
 def _ensure_weights():
     """Download model weights to network volume if not present."""
-    if os.path.exists(FP8_CKPT):
+    CRITICAL_FILES = [
+        FP8_CKPT,
+        os.path.join(WEIGHTS_DIR, "ckpts/hunyuan-video-t2v-720p/vae/config.json"),
+        os.path.join(WEIGHTS_DIR, "ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt"),
+        os.path.join(WEIGHTS_DIR, "ckpts/whisper-tiny/config.json"),
+        os.path.join(WEIGHTS_DIR, "ckpts/llava_llama_image/config.json"),
+        os.path.join(WEIGHTS_DIR, "ckpts/text_encoder_2/config.json"),
+        os.path.join(WEIGHTS_DIR, "ckpts/det_align/detface.pt"),
+    ]
+    missing = [f for f in CRITICAL_FILES if not os.path.exists(f) or os.path.getsize(f) < 10]
+    if not missing:
         ckpt_gb = os.path.getsize(FP8_CKPT) / 1024 / 1024 / 1024
-        print(f"[handler] FP8 checkpoint found: {ckpt_gb:.1f}GB", flush=True)
+        print(f"[handler] All weights found (FP8: {ckpt_gb:.1f}GB)", flush=True)
         return True
+    print(f"[handler] Missing {len(missing)} files: {[os.path.basename(f) for f in missing]}", flush=True)
 
     print(f"[handler] Weights not found — downloading to {WEIGHTS_DIR}...", flush=True)
     if not os.path.exists(VOLUME_DIR):
