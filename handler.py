@@ -53,9 +53,12 @@ def _ensure_weights():
     try:
         # Disable xet storage (causes "Background writer channel closed" errors)
         os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+        os.environ["HF_HUB_DISABLE_XET"] = "1"
+        # Uninstall hf_xet if present to force regular HTTP downloads
+        subprocess.run(["pip", "uninstall", "-y", "hf_xet"], capture_output=True, timeout=30)
         from huggingface_hub import snapshot_download
         os.makedirs(WEIGHTS_DIR, exist_ok=True)
-        print("[handler] Downloading tencent/HunyuanVideo-Avatar (~50GB)...", flush=True)
+        print("[handler] Downloading tencent/HunyuanVideo-Avatar (FP8 ~20GB)...", flush=True)
         # Skip full-precision checkpoint (30GB) — only need FP8 for single GPU
         snapshot_download(
             "tencent/HunyuanVideo-Avatar",
