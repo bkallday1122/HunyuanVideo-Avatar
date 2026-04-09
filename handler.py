@@ -52,7 +52,23 @@ def _ensure_weights():
 
     try:
         os.makedirs(WEIGHTS_DIR, exist_ok=True)
-        print("[handler] Downloading weights via wget (bypassing huggingface_hub)...", flush=True)
+        # Check volume is writable
+        test_file = os.path.join(WEIGHTS_DIR, ".write_test")
+        try:
+            with open(test_file, "w") as f:
+                f.write("ok")
+            os.remove(test_file)
+            print(f"[handler] Volume writable: {WEIGHTS_DIR}", flush=True)
+        except Exception as we:
+            print(f"[handler] ERROR: Volume NOT writable: {we}", flush=True)
+            # Try /tmp as fallback
+            return False
+        # Show disk space
+        st = os.statvfs(WEIGHTS_DIR)
+        free_gb = (st.f_bavail * st.f_frsize) / 1024**3
+        total_gb = (st.f_blocks * st.f_frsize) / 1024**3
+        print(f"[handler] Disk: {free_gb:.1f}GB free / {total_gb:.1f}GB total", flush=True)
+        print("[handler] Downloading weights via curl...", flush=True)
 
         BASE = "https://huggingface.co/tencent/HunyuanVideo-Avatar/resolve/main"
         # Essential files for FP8 single-GPU inference
@@ -94,13 +110,17 @@ def _ensure_weights():
             url = f"{BASE}/{fpath}"
             print(f"  [{i+1}/{len(FILES)}] {fpath}...", flush=True)
             result = subprocess.run(
-                ["curl", "-sL", "--retry", "3", "--retry-delay", "5",
-                 "-o", dest, url],
+                ["curl", "-L", "--retry", "3", "--retry-delay", "5",
+                 "--progress-bar", "-o", dest, url],
                 capture_output=True, timeout=1800,
             )
             if result.returncode != 0 or not os.path.exists(dest) or os.path.getsize(dest) < 10:
-                stderr = (result.stderr or b"").decode()[-200:]
-                print(f"  FAILED {fpath}: exit={result.returncode} {stderr}", flush=True)
+                stderr = (result.stderr or b"").decode()[-300:]
+                stdout = (result.stdout or b"").decode()[-200:]
+                print(f"  FAILED {fpath}: exit={result.returncode}", flush=True)
+                print(f"    stderr: {stderr}", flush=True)
+                print(f"    stdout: {stdout}", flush=True)
+                print(f"    dest exists: {os.path.exists(dest)}, dest dir: {os.path.exists(os.path.dirname(dest))}", flush=True)
                 if os.path.exists(dest):
                     os.remove(dest)
 
