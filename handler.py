@@ -8,6 +8,7 @@ Weights stored on RunPod Network Volume (/runpod-volume/).
 
 import base64
 import csv
+import json
 import os
 import subprocess
 import sys
@@ -67,12 +68,27 @@ def _ensure_weights():
         os.path.join(WEIGHTS_DIR, "ckpts/llava_llama_image/config.json"),
         os.path.join(WEIGHTS_DIR, "ckpts/det_align/detface.pt"),
     ] + TEXT_ENCODER_2_REQUIRED_FILES
+    def _looks_like_html(f):
+        if not os.path.exists(f) or os.path.getsize(f) <= 0:
+            return False
+        with open(f, "rb") as handle:
+            head = handle.read(256).lstrip().lower()
+        return head.startswith(b"<!doctype") or head.startswith(b"<html")
+
     def _valid(f):
         if not os.path.exists(f) or os.path.getsize(f) < 10:
+            return False
+        if _looks_like_html(f):
             return False
         # FP8 checkpoint must be at least 20GB (corrupted partial downloads are smaller)
         if f == FP8_CKPT and os.path.getsize(f) < 20 * 1024**3:
             return False
+        if f.endswith(".json"):
+            try:
+                with open(f, "r", encoding="utf-8") as handle:
+                    json.load(handle)
+            except Exception:
+                return False
         return True
     def _missing_files():
         return [f for f in CRITICAL_FILES if not _valid(f)]
@@ -99,6 +115,9 @@ def _ensure_weights():
                 os.makedirs(os.path.dirname(current_path), exist_ok=True)
                 shutil.move(legacy_path, current_path)
                 repaired += 1
+            elif os.path.exists(legacy_path):
+                print(f"[handler] Removing invalid legacy tokenizer file {legacy_path}", flush=True)
+                os.remove(legacy_path)
         if repaired:
             print(f"[handler] Repaired {repaired} legacy text_encoder_2 tokenizer files", flush=True)
 
@@ -182,14 +201,10 @@ def _ensure_weights():
                 capture_output=True, timeout=1800,
             )
             dest_size = os.path.getsize(dest) if os.path.exists(dest) else 0
-            # Check for HTML error pages (HuggingFace returns HTML on errors)
-            if dest_size > 0 and dest_size < 5000 and fpath.endswith(('.pt', '.safetensors')):
-                with open(dest, 'rb') as check:
-                    head = check.read(20)
-                if b'<!DOCTYPE' in head or b'<html' in head:
-                    print(f"  Got HTML instead of model file for {fpath} — removing", flush=True)
-                    os.remove(dest)
-                    dest_size = 0
+            if dest_size > 0 and not _valid(dest):
+                print(f"  Got invalid file for {fpath} — removing", flush=True)
+                os.remove(dest)
+                dest_size = 0
             if result.returncode != 0 or dest_size < 10:
                 stderr = (result.stderr or b"").decode()[-300:]
                 stdout = (result.stdout or b"").decode()[-200:]
