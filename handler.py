@@ -60,14 +60,40 @@ print(f"[handler] Device: {device}, CUDA: {torch.version.cuda}", flush=True)
 # Download weights to network volume on first startup
 def _ensure_weights():
     """Download model weights to network volume if not present."""
-    CRITICAL_FILES = [
-        FP8_CKPT,
-        os.path.join(WEIGHTS_DIR, "ckpts/hunyuan-video-t2v-720p/vae/config.json"),
-        os.path.join(WEIGHTS_DIR, "ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt"),
-        os.path.join(WEIGHTS_DIR, "ckpts/whisper-tiny/config.json"),
-        os.path.join(WEIGHTS_DIR, "ckpts/llava_llama_image/config.json"),
-        os.path.join(WEIGHTS_DIR, "ckpts/det_align/detface.pt"),
-    ] + TEXT_ENCODER_2_REQUIRED_FILES
+    FILES = [
+        # Config files first (tiny, fast)
+        "ckpts/hunyuan-video-t2v-720p/vae/config.json",
+        "ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states_fp8_map.pt",
+        "ckpts/whisper-tiny/config.json",
+        "ckpts/whisper-tiny/tokenizer.json",
+        "ckpts/whisper-tiny/vocab.json",
+        "ckpts/whisper-tiny/preprocessor_config.json",
+        "ckpts/llava_llama_image/config.json",
+        "ckpts/llava_llama_image/model.safetensors.index.json",
+        "ckpts/llava_llama_image/tokenizer.json",
+        "ckpts/llava_llama_image/tokenizer_config.json",
+        "ckpts/llava_llama_image/special_tokens_map.json",
+        "ckpts/llava_llama_image/preprocessor_config.json",
+        "ckpts/text_encoder_2/config.json",
+        "ckpts/text_encoder_2/merges.txt",
+        "ckpts/text_encoder_2/special_tokens_map.json",
+        "ckpts/text_encoder_2/tokenizer_config.json",
+        "ckpts/text_encoder_2/vocab.json",
+        # Medium files
+        "ckpts/whisper-tiny/model.safetensors",
+        "ckpts/det_align/detface.pt",
+        "ckpts/stable_syncnet.pt",
+        # Large files last
+        "ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt",
+        "ckpts/text_encoder_2/model.safetensors",
+        "ckpts/llava_llama_image/model-00001-of-00004.safetensors",
+        "ckpts/llava_llama_image/model-00002-of-00004.safetensors",
+        "ckpts/llava_llama_image/model-00003-of-00004.safetensors",
+        "ckpts/llava_llama_image/model-00004-of-00004.safetensors",
+        # Biggest file last (~25GB)
+        "ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states_fp8.pt",
+    ]
+    CRITICAL_FILES = [os.path.join(WEIGHTS_DIR, fpath) for fpath in FILES]
     def _looks_like_html(f):
         if not os.path.exists(f) or os.path.getsize(f) <= 0:
             return False
@@ -153,45 +179,14 @@ def _ensure_weights():
         print("[handler] Downloading weights via curl...", flush=True)
 
         BASE = "https://huggingface.co/tencent/HunyuanVideo-Avatar/resolve/main"
-        # Download small config files FIRST, then large model files
-        FILES = [
-            # Config files first (tiny, fast)
-            "ckpts/hunyuan-video-t2v-720p/vae/config.json",
-            "ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states_fp8_map.pt",
-            "ckpts/whisper-tiny/config.json",
-            "ckpts/whisper-tiny/tokenizer.json",
-            "ckpts/whisper-tiny/vocab.json",
-            "ckpts/whisper-tiny/preprocessor_config.json",
-            "ckpts/llava_llama_image/config.json",
-            "ckpts/llava_llama_image/model.safetensors.index.json",
-            "ckpts/llava_llama_image/tokenizer.json",
-            "ckpts/llava_llama_image/tokenizer_config.json",
-            "ckpts/llava_llama_image/special_tokens_map.json",
-            "ckpts/llava_llama_image/preprocessor_config.json",
-            "ckpts/text_encoder_2/config.json",
-            "ckpts/text_encoder_2/merges.txt",
-            "ckpts/text_encoder_2/special_tokens_map.json",
-            "ckpts/text_encoder_2/tokenizer_config.json",
-            "ckpts/text_encoder_2/vocab.json",
-            # Medium files
-            "ckpts/whisper-tiny/model.safetensors",
-            "ckpts/det_align/detface.pt",
-            "ckpts/stable_syncnet.pt",
-            # Large files last
-            "ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt",
-            "ckpts/text_encoder_2/model.safetensors",
-            "ckpts/llava_llama_image/model-00001-of-00004.safetensors",
-            "ckpts/llava_llama_image/model-00002-of-00004.safetensors",
-            "ckpts/llava_llama_image/model-00003-of-00004.safetensors",
-            "ckpts/llava_llama_image/model-00004-of-00004.safetensors",
-            # Biggest file last (~25GB)
-            "ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states_fp8.pt",
-        ]
 
         for i, fpath in enumerate(FILES):
             dest = os.path.join(WEIGHTS_DIR, fpath)
-            if os.path.exists(dest) and os.path.getsize(dest) > 100:
-                continue  # Already downloaded
+            if os.path.exists(dest):
+                if _valid(dest):
+                    continue
+                print(f"  Removing invalid existing file {fpath}", flush=True)
+                os.remove(dest)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             url = f"{BASE}/{fpath}"
             print(f"  [{i+1}/{len(FILES)}] {fpath}...", flush=True)
