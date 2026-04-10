@@ -15,6 +15,9 @@ import sys
 import tempfile
 import time
 
+# Reduce CUDA allocator fragmentation on 24GB cards during long Hunyuan runs.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 # Stub torch.xpu before anything imports diffusers
 import torch
 if not hasattr(torch, "xpu"):
@@ -47,7 +50,7 @@ LEGACY_TEXT_ENCODER_2_TOKENIZER_FILES = {
 PROFILE_PRESETS = {
     "full": {"sample_n_frames": 129, "image_size": 704, "infer_steps": 30, "cfg_scale": 7.5},
     "balanced": {"sample_n_frames": 97, "image_size": 576, "infer_steps": 24, "cfg_scale": 7.2},
-    "low_vram": {"sample_n_frames": 65, "image_size": 512, "infer_steps": 20, "cfg_scale": 7.0},
+    "low_vram": {"sample_n_frames": 49, "image_size": 448, "infer_steps": 18, "cfg_scale": 6.8},
     "failsafe": {"sample_n_frames": 33, "image_size": 384, "infer_steps": 15, "cfg_scale": 6.5},
 }
 
