@@ -9,7 +9,7 @@ import torch.distributed
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
 from hymm_sp.config import parse_args
-from hymm_sp.sample_inference_audio import HunyuanVideoSampler
+from hymm_sp.sample_inference_audio import HunyuanVideoSampler, normalize_sample_n_frames
 from hymm_sp.data_kits.audio_dataset import VideoAudioTextLoaderVal
 from hymm_sp.data_kits.face_align import AlignImage
 
@@ -21,6 +21,7 @@ MODEL_OUTPUT_PATH = os.environ.get('MODEL_BASE')
 
 def main():
     args = parse_args()
+    args.sample_n_frames = normalize_sample_n_frames(args.sample_n_frames)
     models_root_path = Path(args.ckpt)
 
     if not models_root_path.exists():
@@ -77,7 +78,9 @@ def main():
         output_audio_path = f"{save_path}/{videoid}_audio.mp4"
 
         if args.infer_min:
-            batch["audio_len"][0] = 129
+            batch["audio_len"][0] = args.sample_n_frames
+        else:
+            batch["audio_len"][0] = min(int(batch["audio_len"][0]), args.sample_n_frames)
             
         samples = hunyuan_video_sampler.predict(args, batch, wav2vec, feature_extractor, align_instance)
         

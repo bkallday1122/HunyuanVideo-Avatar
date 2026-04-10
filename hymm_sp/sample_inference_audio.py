@@ -13,6 +13,23 @@ from hymm_sp.data_kits.audio_preprocessor import encode_audio, get_facemask
 def align_to(value, alignment):
     return int(math.ceil(value / alignment) * alignment)
 
+
+MIN_SAMPLE_FRAMES = 33
+MAX_SAMPLE_FRAMES = 400
+DEFAULT_SAMPLE_FRAMES = 129
+
+
+def normalize_sample_n_frames(sample_n_frames, default=DEFAULT_SAMPLE_FRAMES):
+    """Clamp to a VAE-compatible 4n+1 frame count without increasing VRAM above the request."""
+    try:
+        sample_n_frames = int(sample_n_frames)
+    except (TypeError, ValueError):
+        sample_n_frames = default
+
+    sample_n_frames = max(MIN_SAMPLE_FRAMES, min(sample_n_frames, MAX_SAMPLE_FRAMES))
+    sample_n_frames = ((sample_n_frames - 1) // 4) * 4 + 1
+    return max(MIN_SAMPLE_FRAMES, sample_n_frames)
+
 class HunyuanVideoSampler(Inference):
     def __init__(self, args, vae, vae_kwargs, text_encoder, model, text_encoder_2=None, pipeline=None,
                  device=0, logger=None):
@@ -92,24 +109,30 @@ class HunyuanVideoSampler(Inference):
         audio_prompts = batch["audio_prompts"].to(self.device)
         weight_dtype = audio_prompts.dtype
 
-        audio_prompts = [encode_audio(wav2vec, audio_feat.to(dtype=wav2vec.dtype), fps.item(), num_frames=batch["audio_len"][0]) for audio_feat in audio_prompts]
+        target_length = normalize_sample_n_frames(args.sample_n_frames)
+        audio_frame_count = max(1, int(batch["audio_len"][0]))
+        audio_prompts = [encode_audio(wav2vec, audio_feat.to(dtype=wav2vec.dtype), fps.item(), num_frames=audio_frame_count) for audio_feat in audio_prompts]
         audio_prompts = torch.cat(audio_prompts, dim=0).to(device=self.device, dtype=weight_dtype)
-        if audio_prompts.shape[1] <= 129:
-            audio_prompts = torch.cat([audio_prompts, torch.zeros_like(audio_prompts[:, :1]).repeat(1,129-audio_prompts.shape[1], 1, 1, 1)], dim=1)
-        else:
-            audio_prompts = torch.cat([audio_prompts, torch.zeros_like(audio_prompts[:, :1]).repeat(1, 5, 1, 1, 1)], dim=1)
+        if audio_prompts.shape[1] < target_length:
+            pad_frames = target_length - audio_prompts.shape[1]
+            audio_prompts = torch.cat(
+                [audio_prompts, torch.zeros_like(audio_prompts[:, :1]).repeat(1, pad_frames, 1, 1, 1)],
+                dim=1,
+            )
+        elif audio_prompts.shape[1] > target_length:
+            audio_prompts = audio_prompts[:, :target_length]
         
         wav2vec.to("cpu")
         torch.cuda.empty_cache()
 
-        uncond_audio_prompts = torch.zeros_like(audio_prompts[:,:129])
+        uncond_audio_prompts = torch.zeros_like(audio_prompts[:, :target_length])
         motion_exp = batch["motion_bucket_id_exps"].to(self.device)
         motion_pose = batch["motion_bucket_id_heads"].to(self.device)
         
         pixel_value_ref = batch['pixel_value_ref'].to(self.device)  # (b f c h w) 取值范围[0,255]
         face_masks = get_facemask(pixel_value_ref.clone(), align_instance, area=3.0) 
 
-        pixel_value_ref = pixel_value_ref.clone().repeat(1,129,1,1,1)
+        pixel_value_ref = pixel_value_ref.clone().repeat(1, target_length, 1, 1, 1)
         uncond_pixel_value_ref = torch.zeros_like(pixel_value_ref)
         pixel_value_ref = pixel_value_ref / 127.5 - 1.             
         uncond_pixel_value_ref = uncond_pixel_value_ref * 2 - 1    
@@ -150,7 +173,6 @@ class HunyuanVideoSampler(Inference):
 
 
         size = (batch['pixel_value_ref'].shape[-2], batch['pixel_value_ref'].shape[-1])
-        target_length = 129
         target_height = align_to(size[0], 16)
         target_width = align_to(size[1], 16)
         concat_dict = {'mode': 'timecat', 'bias': -1} 

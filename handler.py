@@ -30,6 +30,12 @@ FP8_CKPT = os.path.join(
     WEIGHTS_DIR, "ckpts", "hunyuan-video-t2v-720p",
     "transformers", "mp_rank_00_model_states_fp8.pt"
 )
+PROFILE_PRESETS = {
+    "full": {"sample_n_frames": 129, "image_size": 704, "infer_steps": 30, "cfg_scale": 7.5},
+    "balanced": {"sample_n_frames": 97, "image_size": 576, "infer_steps": 24, "cfg_scale": 7.2},
+    "low_vram": {"sample_n_frames": 65, "image_size": 512, "infer_steps": 20, "cfg_scale": 7.0},
+    "failsafe": {"sample_n_frames": 33, "image_size": 384, "infer_steps": 15, "cfg_scale": 6.5},
+}
 
 print("[handler] Loading HunyuanVideo-Avatar...", flush=True)
 _load_start = time.time()
@@ -186,6 +192,7 @@ elif _weights_ok and os.path.isdir(weights_link) and not os.path.islink(weights_
 os.environ["MODEL_BASE"] = WEIGHTS_DIR
 
 # Check VRAM
+vram_gb = None
 if torch.cuda.is_available():
     vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
     print(f"[handler] GPU: {torch.cuda.get_device_name(0)}, VRAM: {vram_gb:.1f}GB", flush=True)
@@ -195,6 +202,130 @@ if torch.cuda.is_available():
 
 _load_elapsed = time.time() - _load_start
 print(f"[handler] Ready in {_load_elapsed:.1f}s", flush=True)
+
+
+def _normalize_frame_count(value, default=129):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = default
+    value = max(33, min(value, 400))
+    return max(33, ((value - 1) // 4) * 4 + 1)
+
+
+def _normalize_image_size(value, default=704):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = default
+    value = max(256, min(value, 704))
+    return max(256, (value // 64) * 64)
+
+
+def _normalize_infer_steps(value, default=30):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = default
+    return max(8, min(value, 50))
+
+
+def _normalize_cfg_scale(value, default=7.5):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        value = default
+    return max(1.0, min(value, 12.0))
+
+
+def _preset_profile(name):
+    profile = PROFILE_PRESETS[name].copy()
+    profile["name"] = name
+    return profile
+
+
+def _default_profile_order():
+    if vram_gb is None:
+        return ["balanced", "low_vram", "failsafe"]
+    if vram_gb < 28:
+        return ["low_vram", "failsafe"]
+    if vram_gb < 40:
+        return ["balanced", "low_vram", "failsafe"]
+    return ["full", "balanced", "low_vram", "failsafe"]
+
+
+def _is_more_conservative(candidate, baseline):
+    return (
+        candidate["sample_n_frames"] <= baseline["sample_n_frames"]
+        and candidate["image_size"] <= baseline["image_size"]
+        and candidate["infer_steps"] <= baseline["infer_steps"]
+    )
+
+
+def _build_attempt_profiles(job_input):
+    order = _default_profile_order()
+    requested_profile_name = job_input.get("quality_profile")
+    if requested_profile_name not in PROFILE_PRESETS:
+        requested_profile_name = order[0]
+
+    requested_profile = _preset_profile(requested_profile_name)
+    if any(key in job_input for key in ("sample_n_frames", "image_size", "infer_steps", "cfg_scale")):
+        requested_profile["name"] = "custom"
+        requested_profile["sample_n_frames"] = _normalize_frame_count(
+            job_input.get("sample_n_frames", requested_profile["sample_n_frames"]),
+            default=requested_profile["sample_n_frames"],
+        )
+        requested_profile["image_size"] = _normalize_image_size(
+            job_input.get("image_size", requested_profile["image_size"]),
+            default=requested_profile["image_size"],
+        )
+        requested_profile["infer_steps"] = _normalize_infer_steps(
+            job_input.get("infer_steps", requested_profile["infer_steps"]),
+            default=requested_profile["infer_steps"],
+        )
+        requested_profile["cfg_scale"] = _normalize_cfg_scale(
+            job_input.get("cfg_scale", requested_profile["cfg_scale"]),
+            default=requested_profile["cfg_scale"],
+        )
+
+    profiles = [requested_profile]
+    if job_input.get("allow_profile_fallbacks", True):
+        for name in order:
+            candidate = _preset_profile(name)
+            if candidate["name"] == requested_profile_name and requested_profile["name"] != "custom":
+                continue
+            if not _is_more_conservative(candidate, requested_profile):
+                continue
+            if any(
+                existing["sample_n_frames"] == candidate["sample_n_frames"]
+                and existing["image_size"] == candidate["image_size"]
+                and existing["infer_steps"] == candidate["infer_steps"]
+                for existing in profiles
+            ):
+                continue
+            profiles.append(candidate)
+    return profiles
+
+
+def _resource_error(returncode, stdout_text, stderr_text):
+    combined = f"{stdout_text}\n{stderr_text}".lower()
+    return (
+        returncode in (-9, 137)
+        or "out of memory" in combined
+        or "cuda error" in combined
+        or "resource exhausted" in combined
+        or "killed" in combined
+    )
+
+
+def _find_output_video(results_dir):
+    for root, dirs, files in os.walk(results_dir):
+        for fname in files:
+            if fname.endswith(".mp4"):
+                output_path = os.path.join(root, fname)
+                if os.path.getsize(output_path) >= 1000:
+                    return output_path
+    return None
 
 
 def handler(job):
@@ -217,9 +348,7 @@ def handler(job):
         audio_b64 = job_input.get("audio_b64")
         audio_url = job_input.get("audio_url")
         prompt = job_input.get("prompt", "a person speaking naturally to camera")
-        infer_steps = int(job_input.get("infer_steps", 30))
         seed = int(job_input.get("seed", 128))
-        cfg_scale = float(job_input.get("cfg_scale", 7.5))
 
         if not audio_b64 and not audio_url:
             return {"error": "Provide audio_b64 or audio_url"}
@@ -264,63 +393,83 @@ def handler(job):
             writer.writerow(["videoid", "image", "audio", "prompt", "fps"])
             writer.writerow(["output", image_path, audio_path, prompt, "25"])
 
+        profiles = _build_attempt_profiles(job_input)
+        output_path = None
+        used_profile = None
+        last_error = None
+
         # Run inference
         try:
-            cmd = [
-                sys.executable, "hymm_sp/sample_gpu_poor.py",
-                "--input", csv_path,
-                "--ckpt", FP8_CKPT,
-                "--sample-n-frames", "129",
-                "--seed", str(seed),
-                "--image-size", "704",
-                "--cfg-scale", str(cfg_scale),
-                "--infer-steps", str(infer_steps),
-                "--use-deepcache", "1",
-                "--flow-shift-eval-video", "5.0",
-                "--save-path", results_dir,
-                "--use-fp8",
-                "--infer-min",
-            ]
+            for attempt_idx, profile in enumerate(profiles, start=1):
+                attempt_dir = os.path.join(results_dir, f"{attempt_idx:02d}_{profile['name']}")
+                os.makedirs(attempt_dir, exist_ok=True)
+                cmd = [
+                    sys.executable, "hymm_sp/sample_gpu_poor.py",
+                    "--input", csv_path,
+                    "--ckpt", FP8_CKPT,
+                    "--sample-n-frames", str(profile["sample_n_frames"]),
+                    "--seed", str(seed),
+                    "--image-size", str(profile["image_size"]),
+                    "--cfg-scale", str(profile["cfg_scale"]),
+                    "--infer-steps", str(profile["infer_steps"]),
+                    "--use-deepcache", "1",
+                    "--flow-shift-eval-video", "5.0",
+                    "--save-path", attempt_dir,
+                    "--use-fp8",
+                    "--infer-min",
+                ]
 
-            if os.environ.get("CPU_OFFLOAD") == "1":
-                cmd.append("--cpu-offload")
+                if os.environ.get("CPU_OFFLOAD") == "1":
+                    cmd.append("--cpu-offload")
 
-            print(f"[hunyuan] Running inference ({infer_steps} steps)...", flush=True)
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True,
-                cwd=HUNYUAN_DIR, timeout=3600,
-                env={**os.environ, "PYTHONPATH": HUNYUAN_DIR,
-                     "MODEL_BASE": WEIGHTS_DIR,
-                     "DISABLE_SP": "1"},
-            )
-            if proc.returncode != 0:
+                print(
+                    f"[hunyuan] Attempt {attempt_idx}/{len(profiles)} "
+                    f"profile={profile['name']} frames={profile['sample_n_frames']} "
+                    f"size={profile['image_size']} steps={profile['infer_steps']}",
+                    flush=True,
+                )
+                proc = subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    cwd=HUNYUAN_DIR, timeout=3600,
+                    env={**os.environ, "PYTHONPATH": HUNYUAN_DIR,
+                         "MODEL_BASE": WEIGHTS_DIR,
+                         "DISABLE_SP": "1"},
+                )
                 stderr_tail = (proc.stderr or "")[-1000:]
                 stdout_tail = (proc.stdout or "")[-500:]
-                print(f"[hunyuan] FAILED (exit {proc.returncode})", flush=True)
-                print(f"[hunyuan] stderr: {stderr_tail}", flush=True)
-                print(f"[hunyuan] stdout: {stdout_tail}", flush=True)
-                return {"error": f"HunyuanVideo failed (exit {proc.returncode}): {stderr_tail[-500:]}"}
+                if proc.returncode == 0:
+                    output_path = _find_output_video(attempt_dir)
+                    if output_path:
+                        used_profile = profile
+                        break
+                    last_error = f"HunyuanVideo produced no output for profile {profile['name']}"
+                else:
+                    print(f"[hunyuan] FAILED (exit {proc.returncode})", flush=True)
+                    print(f"[hunyuan] stderr: {stderr_tail}", flush=True)
+                    print(f"[hunyuan] stdout: {stdout_tail}", flush=True)
+                    last_error = f"HunyuanVideo failed (exit {proc.returncode}): {(stderr_tail or stdout_tail)[-500:]}"
+
+                if used_profile:
+                    break
+
+                if attempt_idx < len(profiles) and _resource_error(proc.returncode, stdout_tail, stderr_tail):
+                    print("[hunyuan] Retrying with a lower-memory profile...", flush=True)
+                    continue
+                break
         except subprocess.TimeoutExpired:
             return {"error": "HunyuanVideo timed out (60 min)"}
         except Exception as e:
             return {"error": f"HunyuanVideo error: {e}"}
 
-        # Find output video
-        output_path = None
-        for root, dirs, files in os.walk(results_dir):
-            for f in files:
-                if f.endswith(".mp4"):
-                    output_path = os.path.join(root, f)
-                    break
-            if output_path:
-                break
-
-        if not output_path or not os.path.exists(output_path) or os.path.getsize(output_path) < 1000:
-            return {"error": "HunyuanVideo produced no output"}
+        if not output_path:
+            return {"error": last_error or "HunyuanVideo produced no output"}
 
         output_size = os.path.getsize(output_path) / 1024 / 1024
         elapsed = time.time() - start
-        print(f"[hunyuan] Done: {output_size:.1f}MB in {elapsed:.1f}s", flush=True)
+        print(
+            f"[hunyuan] Done profile={used_profile['name']}: {output_size:.1f}MB in {elapsed:.1f}s",
+            flush=True,
+        )
 
         # Compress if needed for 20MB RunPod limit
         final_path = output_path
@@ -338,13 +487,20 @@ def handler(job):
                 print(f"[hunyuan] Compressed: {output_size:.1f}MB -> {comp_size:.1f}MB", flush=True)
                 final_path = compressed
 
+        final_size = os.path.getsize(final_path) / 1024 / 1024
         with open(final_path, "rb") as f:
             video_b64 = base64.b64encode(f.read()).decode("ascii")
 
         return {
             "video_b64": video_b64,
             "duration_sec": round(elapsed, 1),
-            "output_size_mb": round(output_size, 1),
+            "output_size_mb": round(final_size, 1),
+            "raw_output_size_mb": round(output_size, 1),
+            "quality_profile": used_profile["name"],
+            "sample_n_frames": used_profile["sample_n_frames"],
+            "image_size": used_profile["image_size"],
+            "infer_steps": used_profile["infer_steps"],
+            "cfg_scale": used_profile["cfg_scale"],
         }
 
 
