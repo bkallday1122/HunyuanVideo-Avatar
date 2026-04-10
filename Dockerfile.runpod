@@ -11,8 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Clone the fork so the container includes the RunPod and low-VRAM fixes in this repo
-RUN git clone https://github.com/bkallday1122/HunyuanVideo-Avatar.git /app/hunyuan
+# Build from the checked-out repo so image layers track the actual pushed source,
+# not a separately cached git clone from an older commit.
+COPY . /app/hunyuan
 
 # Install PyTorch 2.4.0 + CUDA 12.4
 RUN pip install --no-cache-dir \
