@@ -17,6 +17,7 @@ def align_to(value, alignment):
 MIN_SAMPLE_FRAMES = 33
 MAX_SAMPLE_FRAMES = 400
 DEFAULT_SAMPLE_FRAMES = 129
+CONDITIONING_LATENT_WINDOW = 33
 
 
 def normalize_sample_n_frames(sample_n_frames, default=DEFAULT_SAMPLE_FRAMES):
@@ -29,6 +30,25 @@ def normalize_sample_n_frames(sample_n_frames, default=DEFAULT_SAMPLE_FRAMES):
     sample_n_frames = max(MIN_SAMPLE_FRAMES, min(sample_n_frames, MAX_SAMPLE_FRAMES))
     sample_n_frames = ((sample_n_frames - 1) // 4) * 4 + 1
     return max(MIN_SAMPLE_FRAMES, sample_n_frames)
+
+
+def conditioning_video_length(vae_name, latent_window=CONDITIONING_LATENT_WINDOW):
+    """Return the video-frame count that produces one full transformer conditioning window."""
+    if "884" in vae_name:
+        return (latent_window - 1) * 4 + 1
+    if "888" in vae_name:
+        return (latent_window - 1) * 8 + 1
+    return latent_window
+
+
+def match_temporal_length(tensor, target_frames):
+    """Tile or crop a latent sequence to the transformer window length."""
+    if tensor.shape[2] == target_frames:
+        return tensor
+    if tensor.shape[2] > target_frames:
+        return tensor[:, :, :target_frames]
+    repeats = math.ceil(target_frames / tensor.shape[2])
+    return tensor.repeat(1, 1, repeats, 1, 1)[:, :, :target_frames]
 
 class HunyuanVideoSampler(Inference):
     def __init__(self, args, vae, vae_kwargs, text_encoder, model, text_encoder_2=None, pipeline=None,
@@ -110,6 +130,8 @@ class HunyuanVideoSampler(Inference):
         weight_dtype = audio_prompts.dtype
 
         target_length = normalize_sample_n_frames(args.sample_n_frames)
+        ref_condition_video_length = conditioning_video_length(args.vae)
+        ref_condition_latent_length = CONDITIONING_LATENT_WINDOW
         audio_frame_count = max(1, int(batch["audio_len"][0]))
         audio_prompts = [encode_audio(wav2vec, audio_feat.to(dtype=wav2vec.dtype), fps.item(), num_frames=audio_frame_count) for audio_feat in audio_prompts]
         audio_prompts = torch.cat(audio_prompts, dim=0).to(device=self.device, dtype=weight_dtype)
@@ -132,6 +154,8 @@ class HunyuanVideoSampler(Inference):
         pixel_value_ref = batch['pixel_value_ref'].to(self.device)  # (b f c h w) 取值范围[0,255]
         face_masks = get_facemask(pixel_value_ref.clone(), align_instance, area=3.0) 
 
+        # The diffusion pipeline always denoises 33 latent frames per window, even for shorter outputs.
+        # Keep the cheaper short reference encode here, then tile the static latent conditioning to that window.
         pixel_value_ref = pixel_value_ref.clone().repeat(1, target_length, 1, 1, 1)
         uncond_pixel_value_ref = torch.zeros_like(pixel_value_ref)
         pixel_value_ref = pixel_value_ref / 127.5 - 1.             
@@ -161,6 +185,9 @@ class HunyuanVideoSampler(Inference):
             else:
                 ref_latents.mul_(self.vae.config.scaling_factor)
                 uncond_ref_latents.mul_(self.vae.config.scaling_factor)
+
+            ref_latents = match_temporal_length(ref_latents, ref_condition_latent_length)
+            uncond_ref_latents = match_temporal_length(uncond_ref_latents, ref_condition_latent_length)
             
             if args.cpu_offload:
                 self.vae.to('cpu')
@@ -178,7 +205,7 @@ class HunyuanVideoSampler(Inference):
         concat_dict = {'mode': 'timecat', 'bias': -1} 
         # concat_dict = {}
         freqs_cos, freqs_sin = self.get_rotary_pos_embed(
-            target_length, 
+            ref_condition_video_length, 
             target_height, 
             target_width, 
             concat_dict)  
