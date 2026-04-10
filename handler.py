@@ -30,6 +30,19 @@ FP8_CKPT = os.path.join(
     WEIGHTS_DIR, "ckpts", "hunyuan-video-t2v-720p",
     "transformers", "mp_rank_00_model_states_fp8.pt"
 )
+TEXT_ENCODER_2_REQUIRED_FILES = [
+    os.path.join(WEIGHTS_DIR, "ckpts/text_encoder_2/config.json"),
+    os.path.join(WEIGHTS_DIR, "ckpts/text_encoder_2/merges.txt"),
+    os.path.join(WEIGHTS_DIR, "ckpts/text_encoder_2/special_tokens_map.json"),
+    os.path.join(WEIGHTS_DIR, "ckpts/text_encoder_2/tokenizer_config.json"),
+    os.path.join(WEIGHTS_DIR, "ckpts/text_encoder_2/vocab.json"),
+]
+LEGACY_TEXT_ENCODER_2_TOKENIZER_FILES = {
+    os.path.join(WEIGHTS_DIR, "ckpts/text_encoder_2/tokenizer/merges.txt"): os.path.join(WEIGHTS_DIR, "ckpts/text_encoder_2/merges.txt"),
+    os.path.join(WEIGHTS_DIR, "ckpts/text_encoder_2/tokenizer/special_tokens_map.json"): os.path.join(WEIGHTS_DIR, "ckpts/text_encoder_2/special_tokens_map.json"),
+    os.path.join(WEIGHTS_DIR, "ckpts/text_encoder_2/tokenizer/tokenizer_config.json"): os.path.join(WEIGHTS_DIR, "ckpts/text_encoder_2/tokenizer_config.json"),
+    os.path.join(WEIGHTS_DIR, "ckpts/text_encoder_2/tokenizer/vocab.json"): os.path.join(WEIGHTS_DIR, "ckpts/text_encoder_2/vocab.json"),
+}
 PROFILE_PRESETS = {
     "full": {"sample_n_frames": 129, "image_size": 704, "infer_steps": 30, "cfg_scale": 7.5},
     "balanced": {"sample_n_frames": 97, "image_size": 576, "infer_steps": 24, "cfg_scale": 7.2},
@@ -52,9 +65,8 @@ def _ensure_weights():
         os.path.join(WEIGHTS_DIR, "ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt"),
         os.path.join(WEIGHTS_DIR, "ckpts/whisper-tiny/config.json"),
         os.path.join(WEIGHTS_DIR, "ckpts/llava_llama_image/config.json"),
-        os.path.join(WEIGHTS_DIR, "ckpts/text_encoder_2/config.json"),
         os.path.join(WEIGHTS_DIR, "ckpts/det_align/detface.pt"),
-    ]
+    ] + TEXT_ENCODER_2_REQUIRED_FILES
     def _valid(f):
         if not os.path.exists(f) or os.path.getsize(f) < 10:
             return False
@@ -62,7 +74,10 @@ def _ensure_weights():
         if f == FP8_CKPT and os.path.getsize(f) < 20 * 1024**3:
             return False
         return True
-    missing = [f for f in CRITICAL_FILES if not _valid(f)]
+    def _missing_files():
+        return [f for f in CRITICAL_FILES if not _valid(f)]
+
+    missing = _missing_files()
     if not missing:
         ckpt_gb = os.path.getsize(FP8_CKPT) / 1024 / 1024 / 1024
         print(f"[handler] All weights found (FP8: {ckpt_gb:.1f}GB)", flush=True)
@@ -75,9 +90,26 @@ def _ensure_weights():
         return False
 
     try:
-        # If weights dir exists but FP8 checkpoint is missing, it's junk from failed downloads
         import shutil
-        if os.path.exists(WEIGHTS_DIR):
+        repaired = 0
+        for legacy_path, current_path in LEGACY_TEXT_ENCODER_2_TOKENIZER_FILES.items():
+            if _valid(current_path):
+                continue
+            if _valid(legacy_path):
+                os.makedirs(os.path.dirname(current_path), exist_ok=True)
+                shutil.move(legacy_path, current_path)
+                repaired += 1
+        if repaired:
+            print(f"[handler] Repaired {repaired} legacy text_encoder_2 tokenizer files", flush=True)
+
+        missing = _missing_files()
+        if not missing:
+            ckpt_gb = os.path.getsize(FP8_CKPT) / 1024 / 1024 / 1024
+            print(f"[handler] All weights found after repair (FP8: {ckpt_gb:.1f}GB)", flush=True)
+            return True
+
+        # If the FP8 checkpoint is invalid, the weights dir is junk from failed downloads.
+        if os.path.exists(WEIGHTS_DIR) and not _valid(FP8_CKPT):
             # Check actual size with du
             du = subprocess.run(["du", "-sm", WEIGHTS_DIR], capture_output=True, text=True, timeout=30)
             used_mb = int(du.stdout.split()[0]) if du.returncode == 0 else 0
@@ -88,6 +120,9 @@ def _ensure_weights():
             if os.path.exists(hf_cache):
                 shutil.rmtree(hf_cache, ignore_errors=True)
                 print(f"[handler] Cleaned HF cache too", flush=True)
+        elif os.path.exists(WEIGHTS_DIR):
+            missing_names = [os.path.relpath(path, WEIGHTS_DIR) for path in missing]
+            print(f"[handler] Preserving existing weights dir and downloading missing files: {missing_names}", flush=True)
 
         os.makedirs(WEIGHTS_DIR, exist_ok=True)
         # Verify writable
@@ -165,12 +200,13 @@ def _ensure_weights():
                 if os.path.exists(dest):
                     os.remove(dest)
 
-        if os.path.exists(FP8_CKPT) and os.path.getsize(FP8_CKPT) > 1000000:
+        missing = _missing_files()
+        if not missing:
             ckpt_gb = os.path.getsize(FP8_CKPT) / 1024 / 1024 / 1024
             print(f"[handler] Download complete: FP8 checkpoint {ckpt_gb:.1f}GB", flush=True)
             return True
         else:
-            print(f"[handler] FP8 checkpoint missing or too small after download!", flush=True)
+            print(f"[handler] Critical files still missing after download: {[os.path.basename(f) for f in missing]}", flush=True)
             return False
     except Exception as e:
         print(f"[handler] Weight download failed: {e}", flush=True)
