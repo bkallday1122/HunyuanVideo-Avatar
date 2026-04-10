@@ -1078,6 +1078,14 @@ class HunyuanVideoAudioPipeline(DiffusionPipeline):
         latents_all = latents.clone()
         pad_audio_length = (audio_prompts.shape[1] // 128 + 1) * 128 + 4 - audio_prompts.shape[1]
         audio_prompts_all = torch.cat([audio_prompts, torch.zeros_like(audio_prompts[:, :pad_audio_length])], dim=1)
+        uncond_pad_audio_length = max(0, audio_prompts_all.shape[1] - uncond_audio_prompts.shape[1])
+        if uncond_pad_audio_length > 0:
+            uncond_audio_prompts_all = torch.cat(
+                [uncond_audio_prompts, torch.zeros_like(uncond_audio_prompts[:, :1]).repeat(1, uncond_pad_audio_length, 1, 1, 1)],
+                dim=1,
+            )
+        else:
+            uncond_audio_prompts_all = uncond_audio_prompts[:, :audio_prompts_all.shape[1]]
 
 
         shift = 0
@@ -1118,6 +1126,7 @@ class HunyuanVideoAudioPipeline(DiffusionPipeline):
 
                     idx_list_audio = [ii % audio_prompts_all.shape[1] for ii in range(index_start * 4, (index_start + frames_per_batch) * 4 - 3)]
                     audio_prompts = audio_prompts_all[:, idx_list_audio].clone()
+                    uncond_audio_prompts_window = uncond_audio_prompts_all[:, idx_list_audio].clone()
 
                     # expand the latents if we are doing classifier free guidance
                     if self.do_classifier_free_guidance:
@@ -1130,7 +1139,7 @@ class HunyuanVideoAudioPipeline(DiffusionPipeline):
                     if self.do_classifier_free_guidance:
                         if i < 10:
                             self._guidance_scale = (1 - i / len(timesteps)) * (self.start_cfg_scale - 2) + 2
-                            audio_prompts_input = torch.cat([uncond_audio_prompts, audio_prompts], dim=0)
+                            audio_prompts_input = torch.cat([uncond_audio_prompts_window, audio_prompts], dim=0)
                             face_masks_input = torch.cat([face_masks * 0.6] * 2, dim=0)
                         else:
                             # define 10-50 step cfg
@@ -1143,7 +1152,7 @@ class HunyuanVideoAudioPipeline(DiffusionPipeline):
                                 prompt_embeds_2_input = torch.cat([prompt_embeds_2, prompt_embeds_2])
                             if prompt_mask_2 is not None:
                                 prompt_mask_2_input = torch.cat([prompt_mask_2, prompt_mask_2])
-                            audio_prompts_input = torch.cat([uncond_audio_prompts, audio_prompts], dim=0)
+                            audio_prompts_input = torch.cat([uncond_audio_prompts_window, audio_prompts], dim=0)
                             face_masks_input = torch.cat([face_masks] * 2, dim=0)
 
                         motion_exp_input = torch.cat([motion_exp] * 2, dim=0)
