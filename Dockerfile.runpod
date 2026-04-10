@@ -11,8 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Clone HunyuanVideo-Avatar
-RUN git clone https://github.com/Tencent-Hunyuan/HunyuanVideo-Avatar.git /app/hunyuan
+# Clone the fork so the container includes the RunPod and low-VRAM fixes in this repo
+RUN git clone https://github.com/bkallday1122/HunyuanVideo-Avatar.git /app/hunyuan
 
 # Install PyTorch 2.4.0 + CUDA 12.4
 RUN pip install --no-cache-dir \
@@ -25,10 +25,8 @@ RUN pip install --no-cache-dir flash-attn==2.6.3 --no-build-isolation
 # Install HunyuanVideo-Avatar requirements
 RUN cd /app/hunyuan && pip install --no-cache-dir -r requirements.txt
 
-# Install runpod + fix version conflicts
+# Install runpod runtime helpers
 RUN pip install --no-cache-dir runpod numpy==1.24.4 huggingface_hub
-# Fix diffusers/transformers compat (FLAX_WEIGHTS_NAME removed in newer transformers)
-RUN pip install --no-cache-dir "transformers>=4.50.0,<4.52.0" "diffusers==0.33.0"
 
 # Weights downloaded at startup to /runpod-volume/ (network volume)
 COPY handler.py /app/handler.py
